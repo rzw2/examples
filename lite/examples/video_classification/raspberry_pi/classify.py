@@ -18,9 +18,18 @@ import sys
 import time
 
 import cv2
+import numpy as np
 
 from video_classifier import VideoClassifier
 from video_classifier import VideoClassifierOptions
+
+import ctypes
+from ctypes.util import find_library
+tmp_lib = find_library("gomp")
+if tmp_lib != None:
+    # This is a hacky way to get on camera python working, as OpenMP linking isn't working
+    ctypes.CDLL(tmp_lib, mode=ctypes.RTLD_GLOBAL)
+    import chronoptics.tof as tof
 
 # Visualization parameters
 _ROW_SIZE = 20  # pixels
@@ -34,139 +43,168 @@ _MODEL_FPS_ERROR_RANGE = 0.1  # Acceptable error range in fps.
 
 def run(model: str, label: str, max_results: int, num_threads: int,
         camera_id: int, width: int, height: int) -> None:
-  """Continuously run inference on images acquired from the camera.
+    """Continuously run inference on images acquired from the camera.
 
-  Args:
-      model: Name of the TFLite video classification model.
-      label: Name of the video classification label.
-      max_results: Max of classification results.
-      num_threads: Number of CPU threads to run the model.
-      camera_id: The camera id to be passed to OpenCV.
-      width: The width of the frame captured from the camera.
-      height: The height of the frame captured from the camera.
-  """
-  # Initialize the video classification model
-  options = VideoClassifierOptions(
-      num_threads=num_threads, max_results=max_results)
-  classifier = VideoClassifier(model, label, options)
+    Args:
+        model: Name of the TFLite video classification model.
+        label: Name of the video classification label.
+        max_results: Max of classification results.
+        num_threads: Number of CPU threads to run the model.
+        camera_id: The camera id to be passed to OpenCV.
+        width: The width of the frame captured from the camera.
+        height: The height of the frame captured from the camera.
+    """
+    # Initialize the video classification model
+    options = VideoClassifierOptions(
+        num_threads=num_threads, max_results=max_results)
+    classifier = VideoClassifier(model, label, options)
 
-  # Variables to calculate FPS
-  counter, fps, last_inference_start_time, time_per_infer = 0, 0, 0, 0
-  categories = []
+    # Variables to calculate FPS
+    counter, fps, last_inference_start_time, time_per_infer = 0, 0, 0, 0
+    categories = []
 
-  # Start capturing video input from the camera
-  cap = cv2.VideoCapture(camera_id)
-  cap.set(cv2.CAP_PROP_FRAME_WIDTH, width)
-  cap.set(cv2.CAP_PROP_FRAME_HEIGHT, height)
+    dmax = 15.0
+    fps = 8
+    channel = 0
+    qvga = False
 
-  # Continuously capture images from the camera and run inference
-  while cap.isOpened():
-    success, image = cap.read()
-    if not success:
-      sys.exit(
-          'ERROR: Unable to read from webcam. Please verify your webcam settings.'
-      )
-    counter += 1
+    # Use the Chronoptics Kea camera instead of the /dev/video1
+    proc = tof.ProcessingConfig()
 
-    # Mirror the image
-    image = cv2.flip(image, 1)
+    user = tof.UserConfig()
+    # Example of using the camera configuration
+    user.setFps(fps)
+    user.setMaxDistance(dmax)
+    user.setEnvironment(tof.ImagingEnvironment.INSIDE)
+    user.setIntegrationTime(tof.IntegrationTime.MEDIUM)
+    user.setStrategy(tof.Strategy.BALANCED)
+    user.setChannel(channel)
 
-    # Ensure that frames are feed to the model at {_MODEL_FPS} frames per second
-    # as required in the model specs.
-    current_frame_start_time = time.time()
-    diff = current_frame_start_time - last_inference_start_time
-    if diff * _MODEL_FPS >= (1 - _MODEL_FPS_ERROR_RANGE):
-      # Store the time when inference starts.
-      last_inference_start_time = current_frame_start_time
+    cam = tof.EmbeddedKeaCamera(proc)
+    #cam = tof.KeaCamera(proc, "")
+    config = user.toCameraConfig(cam)
 
-      # Calculate the inference FPS
-      fps = 1.0 / diff
+    if qvga:
+        for n in range(0, config.frameSize()):
+            config.setBinning(n, 1)
+    proc_update = config.defaultProcessing()
+    cam.setCameraConfig(config)
+    cam.setProcessConfig(proc_update)
 
-      # Convert the frame to RGB as required by the TFLite model.
-      frame_rgb = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
+    # Start capturing video input from the camera
+    #cap = cv2.VideoCapture(camera_id)
+    #cap.set(cv2.CAP_PROP_FRAME_WIDTH, width)
+    #cap.set(cv2.CAP_PROP_FRAME_HEIGHT, height)
 
-      # Feed the frame to the video classification model.
-      categories = classifier.classify(frame_rgb)
+    tof.selectStreams(cam, [tof.FrameType.BGR_PROJECTED])
+    cam.start()
 
-      # Calculate time required per inference.
-      time_per_infer = time.time() - current_frame_start_time
+    # Continuously capture images from the camera and run inference
+    while cam.isStreaming():
+        frames = cam.getFrames()
+        image = np.asarray(frames[0])
 
-    # Notes: Frames that aren't fed to the model are still displayed to make the
-    # video look smooth. We'll show classification results from the latest
-    # classification run on the screen.
-    # Show the FPS .
-    fps_text = 'Current FPS = {0:.1f}. Expect: {1}'.format(fps, _MODEL_FPS)
-    text_location = (_LEFT_MARGIN, _ROW_SIZE)
-    cv2.putText(image, fps_text, text_location, cv2.FONT_HERSHEY_PLAIN,
-                _FONT_SIZE, _TEXT_COLOR, _FONT_THICKNESS)
+        counter += 1
 
-    # Show the time per inference.
-    time_per_infer_text = 'Time per inference: {0}ms'.format(
-        int(time_per_infer * 1000))
-    text_location = (_LEFT_MARGIN, _ROW_SIZE * 2)
-    cv2.putText(image, time_per_infer_text, text_location,
-                cv2.FONT_HERSHEY_PLAIN, _FONT_SIZE, _TEXT_COLOR,
-                _FONT_THICKNESS)
+        # Mirror the image
+        image = cv2.flip(image, 1)
 
-    # Show classification results on the image.
-    for idx, category in enumerate(categories):
-      class_name = category.label
-      probability = round(category.score, 2)
-      result_text = class_name + ' (' + str(probability) + ')'
-      # Skip the first 2 lines occupied by the fps and time per inference.
-      text_location = (_LEFT_MARGIN, (idx + 3) * _ROW_SIZE)
-      cv2.putText(image, result_text, text_location, cv2.FONT_HERSHEY_PLAIN,
-                  _FONT_SIZE, _TEXT_COLOR, _FONT_THICKNESS)
+        # Ensure that frames are feed to the model at {_MODEL_FPS} frames per second
+        # as required in the model specs.
+        current_frame_start_time = time.time()
+        diff = current_frame_start_time - last_inference_start_time
+        if diff * _MODEL_FPS >= (1 - _MODEL_FPS_ERROR_RANGE):
+            # Store the time when inference starts.
+            last_inference_start_time = current_frame_start_time
 
-    # Stop the program if the ESC key is pressed.
-    if cv2.waitKey(1) == 27:
-      break
-    cv2.imshow('video_classification', image)
+            # Calculate the inference FPS
+            fps = 1.0 / diff
 
-  cap.release()
-  cv2.destroyAllWindows()
+            # Convert the frame to RGB as required by the TFLite model.
+            frame_rgb = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
+
+            # Feed the frame to the video classification model.
+            categories = classifier.classify(frame_rgb)
+
+            # Calculate time required per inference.
+            time_per_infer = time.time() - current_frame_start_time
+
+        # Notes: Frames that aren't fed to the model are still displayed to make the
+        # video look smooth. We'll show classification results from the latest
+        # classification run on the screen.
+        # Show the FPS .
+        fps_text = 'Current FPS = {0:.1f}. Expect: {1}'.format(fps, _MODEL_FPS)
+        text_location = (_LEFT_MARGIN, _ROW_SIZE)
+        cv2.putText(image, fps_text, text_location, cv2.FONT_HERSHEY_PLAIN,
+                    _FONT_SIZE, _TEXT_COLOR, _FONT_THICKNESS)
+
+        # Show the time per inference.
+        time_per_infer_text = 'Time per inference: {0}ms'.format(
+            int(time_per_infer * 1000))
+        text_location = (_LEFT_MARGIN, _ROW_SIZE * 2)
+        cv2.putText(image, time_per_infer_text, text_location,
+                    cv2.FONT_HERSHEY_PLAIN, _FONT_SIZE, _TEXT_COLOR,
+                    _FONT_THICKNESS)
+
+        # Show classification results on the image.
+        for idx, category in enumerate(categories):
+            class_name = category.label
+            probability = round(category.score, 2)
+            result_text = class_name + ' (' + str(probability) + ')'
+            # Skip the first 2 lines occupied by the fps and time per inference.
+            text_location = (_LEFT_MARGIN, (idx + 3) * _ROW_SIZE)
+            cv2.putText(image, result_text, text_location, cv2.FONT_HERSHEY_PLAIN,
+                        _FONT_SIZE, _TEXT_COLOR, _FONT_THICKNESS)
+
+        # Stop the program if the ESC key is pressed.
+        if cv2.waitKey(1) == 27:
+            break
+        cv2.imshow('video_classification', image)
+
+    cam.stop()
+    cv2.destroyAllWindows()
 
 
 def main():
-  parser = argparse.ArgumentParser(
-      formatter_class=argparse.ArgumentDefaultsHelpFormatter)
-  parser.add_argument(
-      '--model',
-      help='Name of video classification model.',
-      required=False,
-      default='movinet_a0_int8.tflite')
-  parser.add_argument(
-      '--label',
-      help='Name of video classification label.',
-      required=False,
-      default='kinetics600_label_map.txt')
-  parser.add_argument(
-      '--maxResults',
-      help='Max of classification results.',
-      required=False,
-      default=3)
-  parser.add_argument(
-      '--numThreads',
-      help='Number of CPU threads to run the model.',
-      required=False,
-      default=4)
-  parser.add_argument(
-      '--cameraId', help='Id of camera.', required=False, default=0)
-  parser.add_argument(
-      '--frameWidth',
-      help='Width of frame to capture from camera.',
-      required=False,
-      default=640)
-  parser.add_argument(
-      '--frameHeight',
-      help='Height of frame to capture from camera.',
-      required=False,
-      default=480)
-  args = parser.parse_args()
+    parser = argparse.ArgumentParser(
+        formatter_class=argparse.ArgumentDefaultsHelpFormatter)
+    parser.add_argument(
+        '--model',
+        help='Name of video classification model.',
+        required=False,
+        default='movinet_a0_int8.tflite')
+    parser.add_argument(
+        '--label',
+        help='Name of video classification label.',
+        required=False,
+        default='kinetics600_label_map.txt')
+    parser.add_argument(
+        '--maxResults',
+        help='Max of classification results.',
+        required=False,
+        default=3)
+    parser.add_argument(
+        '--numThreads',
+        help='Number of CPU threads to run the model.',
+        required=False,
+        default=4)
+    parser.add_argument(
+        '--cameraId', help='Id of camera.', required=False, default=0)
+    parser.add_argument(
+        '--frameWidth',
+        help='Width of frame to capture from camera.',
+        required=False,
+        default=640)
+    parser.add_argument(
+        '--frameHeight',
+        help='Height of frame to capture from camera.',
+        required=False,
+        default=480)
+    args = parser.parse_args()
 
-  run(args.model, args.label, int(args.maxResults), int(args.numThreads),
-      int(args.cameraId), args.frameWidth, args.frameHeight)
+    run(args.model, args.label, int(args.maxResults), int(args.numThreads),
+        int(args.cameraId), args.frameWidth, args.frameHeight)
 
 
 if __name__ == '__main__':
-  main()
+    main()

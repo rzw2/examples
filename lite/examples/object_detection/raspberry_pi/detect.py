@@ -82,6 +82,7 @@ def run(model: str, camera_id: int, width: int, height: int, num_threads: int,
     #cap.set(cv2.CAP_PROP_FRAME_HEIGHT, height)
 
     tof.selectStreams(cam, [tof.FrameType.BGR_PROJECTED])
+    cam.start()
 
     # Visualization parameters
     row_size = 20  # pixels

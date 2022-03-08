@@ -18,8 +18,17 @@ import sys
 import time
 
 import cv2
+import numpy as np
 from image_classifier import ImageClassifier
 from image_classifier import ImageClassifierOptions
+
+import ctypes
+from ctypes.util import find_library
+tmp_lib = find_library("gomp")
+if tmp_lib != None:
+    # This is a hacky way to get on camera python working, as OpenMP linking isn't working
+    ctypes.CDLL(tmp_lib, mode=ctypes.RTLD_GLOBAL)
+    import chronoptics.tof as tof
 
 # Visualization parameters
 _ROW_SIZE = 20  # pixels
@@ -32,118 +41,146 @@ _FPS_AVERAGE_FRAME_COUNT = 10
 
 def run(model: str, max_results: int, num_threads: int, enable_edgetpu: bool,
         camera_id: int, width: int, height: int) -> None:
-  """Continuously run inference on images acquired from the camera.
+    """Continuously run inference on images acquired from the camera.
 
-  Args:
-      model: Name of the TFLite image classification model.
-      max_results: Max of classification results.
-      num_threads: Number of CPU threads to run the model.
-      enable_edgetpu: Whether to run the model on EdgeTPU.
-      camera_id: The camera id to be passed to OpenCV.
-      width: The width of the frame captured from the camera.
-      height: The height of the frame captured from the camera.
-  """
+    Args:
+        model: Name of the TFLite image classification model.
+        max_results: Max of classification results.
+        num_threads: Number of CPU threads to run the model.
+        enable_edgetpu: Whether to run the model on EdgeTPU.
+        camera_id: The camera id to be passed to OpenCV.
+        width: The width of the frame captured from the camera.
+        height: The height of the frame captured from the camera.
+    """
 
-  # Initialize the image classification model
-  options = ImageClassifierOptions(
-      num_threads=num_threads,
-      max_results=max_results,
-      enable_edgetpu=enable_edgetpu)
-  classifier = ImageClassifier(model, options)
+    # Initialize the image classification model
+    options = ImageClassifierOptions(
+        num_threads=num_threads,
+        max_results=max_results,
+        enable_edgetpu=enable_edgetpu)
+    classifier = ImageClassifier(model, options)
 
-  # Variables to calculate FPS
-  counter, fps = 0, 0
-  start_time = time.time()
+    # Variables to calculate FPS
+    counter, fps = 0, 0
+    start_time = time.time()
 
-  # Start capturing video input from the camera
-  cap = cv2.VideoCapture(camera_id)
-  cap.set(cv2.CAP_PROP_FRAME_WIDTH, width)
-  cap.set(cv2.CAP_PROP_FRAME_HEIGHT, height)
+    dmax = 15.0
+    fps = 8
+    channel = 0
+    qvga = False
 
-  # Continuously capture images from the camera and run inference
-  while cap.isOpened():
-    success, image = cap.read()
-    if not success:
-      sys.exit(
-          'ERROR: Unable to read from webcam. Please verify your webcam settings.'
-      )
+    # Use the Chronoptics Kea camera instead of the /dev/video1
+    proc = tof.ProcessingConfig()
 
-    counter += 1
-    image = cv2.flip(image, 1)
-    # List classification results
-    categories = classifier.classify(image)
-    # Show classification results on the image
-    for idx, category in enumerate(categories):
-      class_name = category.label
-      score = round(category.score, 2)
-      result_text = class_name + ' (' + str(score) + ')'
-      text_location = (_LEFT_MARGIN, (idx + 2) * _ROW_SIZE)
-      cv2.putText(image, result_text, text_location, cv2.FONT_HERSHEY_PLAIN,
-                  _FONT_SIZE, _TEXT_COLOR, _FONT_THICKNESS)
+    user = tof.UserConfig()
+    # Example of using the camera configuration
+    user.setFps(fps)
+    user.setMaxDistance(dmax)
+    user.setEnvironment(tof.ImagingEnvironment.INSIDE)
+    user.setIntegrationTime(tof.IntegrationTime.MEDIUM)
+    user.setStrategy(tof.Strategy.BALANCED)
+    user.setChannel(channel)
 
-    # Calculate the FPS
-    if counter % _FPS_AVERAGE_FRAME_COUNT == 0:
-      end_time = time.time()
-      fps = _FPS_AVERAGE_FRAME_COUNT / (end_time - start_time)
-      start_time = time.time()
+    cam = tof.EmbeddedKeaCamera(proc)
+    #cam = tof.KeaCamera(proc, "")
+    config = user.toCameraConfig(cam)
 
-    # Show the FPS
-    fps_text = 'FPS = ' + str(int(fps))
-    text_location = (_LEFT_MARGIN, _ROW_SIZE)
-    cv2.putText(image, fps_text, text_location, cv2.FONT_HERSHEY_PLAIN,
-                _FONT_SIZE, _TEXT_COLOR, _FONT_THICKNESS)
+    if qvga:
+        for n in range(0, config.frameSize()):
+            config.setBinning(n, 1)
+    proc_update = config.defaultProcessing()
+    cam.setCameraConfig(config)
+    cam.setProcessConfig(proc_update)
 
-    # Stop the program if the ESC key is pressed.
-    if cv2.waitKey(1) == 27:
-      break
-    cv2.imshow('image_classification', image)
+    # Start capturing video input from the camera
+    #cap = cv2.VideoCapture(camera_id)
+    #cap.set(cv2.CAP_PROP_FRAME_WIDTH, width)
+    #cap.set(cv2.CAP_PROP_FRAME_HEIGHT, height)
 
-  cap.release()
-  cv2.destroyAllWindows()
+    tof.selectStreams(cam, [tof.FrameType.BGR_PROJECTED])
+    cam.start()
+
+    # Continuously capture images from the camera and run inference
+    while cam.isStreaming():
+        frames = cam.getFrames()
+        image = np.asarray(frames[0])
+
+        counter += 1
+        image = cv2.flip(image, 1)
+        # List classification results
+        categories = classifier.classify(image)
+        # Show classification results on the image
+        for idx, category in enumerate(categories):
+            class_name = category.label
+            score = round(category.score, 2)
+            result_text = class_name + ' (' + str(score) + ')'
+            text_location = (_LEFT_MARGIN, (idx + 2) * _ROW_SIZE)
+            cv2.putText(image, result_text, text_location, cv2.FONT_HERSHEY_PLAIN,
+                        _FONT_SIZE, _TEXT_COLOR, _FONT_THICKNESS)
+
+        # Calculate the FPS
+        if counter % _FPS_AVERAGE_FRAME_COUNT == 0:
+            end_time = time.time()
+            fps = _FPS_AVERAGE_FRAME_COUNT / (end_time - start_time)
+            start_time = time.time()
+
+        # Show the FPS
+        fps_text = 'FPS = ' + str(int(fps))
+        text_location = (_LEFT_MARGIN, _ROW_SIZE)
+        cv2.putText(image, fps_text, text_location, cv2.FONT_HERSHEY_PLAIN,
+                    _FONT_SIZE, _TEXT_COLOR, _FONT_THICKNESS)
+
+        # Stop the program if the ESC key is pressed.
+        if cv2.waitKey(1) == 27:
+            break
+        cv2.imshow('image_classification', image)
+
+    cam.stop()
+    cv2.destroyAllWindows()
 
 
 def main():
-  parser = argparse.ArgumentParser(
-      formatter_class=argparse.ArgumentDefaultsHelpFormatter)
-  parser.add_argument(
-      '--model',
-      help='Name of image classification model.',
-      required=False,
-      default='efficientnet_lite0.tflite')
-  parser.add_argument(
-      '--maxResults',
-      help='Max of classification results.',
-      required=False,
-      default=3)
-  parser.add_argument(
-      '--numThreads',
-      help='Number of CPU threads to run the model.',
-      required=False,
-      default=4)
-  parser.add_argument(
-      '--enableEdgeTPU',
-      help='Whether to run the model on EdgeTPU.',
-      action='store_true',
-      required=False,
-      default=False)
-  parser.add_argument(
-      '--cameraId', help='Id of camera.', required=False, default=0)
-  parser.add_argument(
-      '--frameWidth',
-      help='Width of frame to capture from camera.',
-      required=False,
-      default=640)
-  parser.add_argument(
-      '--frameHeight',
-      help='Height of frame to capture from camera.',
-      required=False,
-      default=480)
-  args = parser.parse_args()
+    parser = argparse.ArgumentParser(
+        formatter_class=argparse.ArgumentDefaultsHelpFormatter)
+    parser.add_argument(
+        '--model',
+        help='Name of image classification model.',
+        required=False,
+        default='efficientnet_lite0.tflite')
+    parser.add_argument(
+        '--maxResults',
+        help='Max of classification results.',
+        required=False,
+        default=3)
+    parser.add_argument(
+        '--numThreads',
+        help='Number of CPU threads to run the model.',
+        required=False,
+        default=4)
+    parser.add_argument(
+        '--enableEdgeTPU',
+        help='Whether to run the model on EdgeTPU.',
+        action='store_true',
+        required=False,
+        default=False)
+    parser.add_argument(
+        '--cameraId', help='Id of camera.', required=False, default=0)
+    parser.add_argument(
+        '--frameWidth',
+        help='Width of frame to capture from camera.',
+        required=False,
+        default=640)
+    parser.add_argument(
+        '--frameHeight',
+        help='Height of frame to capture from camera.',
+        required=False,
+        default=480)
+    args = parser.parse_args()
 
-  run(args.model, int(args.maxResults), int(args.numThreads),
-      bool(args.enableEdgeTPU), int(args.cameraId), args.frameWidth,
-      args.frameHeight)
+    run(args.model, int(args.maxResults), int(args.numThreads),
+        bool(args.enableEdgeTPU), int(args.cameraId), args.frameWidth,
+        args.frameHeight)
 
 
 if __name__ == '__main__':
-  main()
+    main()
