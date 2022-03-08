@@ -106,7 +106,7 @@ def run(model: str, max_results: int, num_threads: int, enable_edgetpu: bool,
         image = np.asarray(frames[0])
 
         counter += 1
-        image = cv2.flip(image, 1)
+        image = cv2.flip(image, 0)
         # List classification results
         categories = classifier.classify(image)
         # Show classification results on the image

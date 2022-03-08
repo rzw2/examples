@@ -106,7 +106,7 @@ def run(model: str, camera_id: int, width: int, height: int, num_threads: int,
         image = np.asarray(frames[0])
 
         counter += 1
-        image = cv2.flip(image, 1)
+        image = cv2.flip(image, 0)
 
         # Run object detection estimation using the model.
         detections = detector.detect(image)

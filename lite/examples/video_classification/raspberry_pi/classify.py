@@ -107,7 +107,7 @@ def run(model: str, label: str, max_results: int, num_threads: int,
         counter += 1
 
         # Mirror the image
-        image = cv2.flip(image, 1)
+        image = cv2.flip(image, 0)
 
         # Ensure that frames are feed to the model at {_MODEL_FPS} frames per second
         # as required in the model specs.

@@ -112,7 +112,7 @@ def run(model: str, display_mode: str, num_threads: int, enable_edgetpu: bool,
         image = np.asarray(frames[0])
 
         counter += 1
-        image = cv2.flip(image, 1)
+        image = cv2.flip(image, 0)
 
         # Segment with each frame from camera.
         segmentation_result = segmenter.segment(image)

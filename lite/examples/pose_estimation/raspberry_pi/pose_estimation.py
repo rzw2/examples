@@ -126,7 +126,7 @@ def run(estimation_model: str, tracker_type: str, classification_model: str,
         image = np.asarray(frames[0])
 
         counter += 1
-        image = cv2.flip(image, 1)
+        image = cv2.flip(image, 0)
 
         if estimation_model == 'movenet_multipose':
             # Run pose estimation using a MultiPose model.
