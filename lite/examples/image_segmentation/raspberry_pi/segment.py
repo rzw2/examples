@@ -70,6 +70,7 @@ def run(model: str, display_mode: str, num_threads: int, enable_edgetpu: bool,
     counter, fps = 0, 0
     start_time = time.time()
 
+    # Need to add these as inputs to the script
     dmax = 15.0
     fps = 8
     channel = 0

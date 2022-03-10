@@ -44,7 +44,7 @@ sh setup.sh
 First, clone this Git repo onto your Raspberry Pi like this:
 
 ```
-git clone https://github.com/tensorflow/examples --depth 1
+git clone https://github.com/rzw2/examples --depth 1
 ```
 
 Then use our script to install a couple Python packages, and
